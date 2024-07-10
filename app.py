@@ -2,8 +2,9 @@
 from flask import Flask, request, jsonify, session, abort, send_from_directory, url_for # core flask imports
 from flask_bcrypt import Bcrypt # For Password Hashing
 from flask_session import Session # For server-side Session Management
-from models import User, Post # Import the user and post model
+from models import User, Post, Comment # Import the user and post model
 from flask_migrate import Migrate
+from sqlalchemy.orm import joinedload
 from config import ApplicationConfig # Import App config
 from database import db # Import the database instance
 from sqlalchemy import desc
@@ -37,18 +38,159 @@ ALLOWED_EXTENSIONS = {"png", "jpg","jpeg"}
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-'''
-@app.route('/comments', methods=['Post'])
-
-# GET all my comments
-@app.route('/comment/me', methods=['GET'])
-
-# GET all comments for the post_id
-@app.route('/comment/<post_id>', methods=['GET'])
-def get_posts_comments():
+@app.route('/save_post/<post_id>', methods=['POST'])
+def save_post(post_id):
+    user_id = session.get('user_id')
+    print(user_id)
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
     
-'''
+    try:
+        if not request.is_json:
+            return jsonify({"error": "Invalid request data. Expected JSON."}), 400
+        
+        data = request.get_json()
+        user_id = data.get('user_id')
 
+        if user_id != session_user_id:
+            return jsonify({'error': 'Unathorized access to save post'})
+        
+
+        user = User.query.get(user_id)
+        post = Post.query.get(post_id)
+
+        if not post:
+            return jsonify({"error": "Post not found"}), 404
+        
+        # Check if the post is already saved by the user 
+
+        if post in user.saved_posts:
+            return jsonify({"message": "Post already saved"}), 200
+        
+        user.saved_posts.append(post)
+        db.session.commit()
+
+        return jsonify({"message": "Post saved successfully"}), 201
+    except Exception as e:
+        print(f'Error saving post: {e}')
+        return jsonify({"error": "Internal Server Error"}), 500
+
+# Get saved POsts for the Logged in User
+@app.route('/saved_posts', methods=['GET'])
+def get_saved_post():
+    user = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unathorized"}), 401
+    
+    try: 
+        user = User.query.get(user_id)
+        saved_posts_data = [
+            {
+                'id': post.id,
+                'user_id': post.user.user_id,
+                'username': post.user.username,
+                'content_type': post.content_type,
+                'content_url': post.content_url,
+                'timestamp': post.timestamp,
+                'category': post.category
+
+            } for post in user.saved_posts
+        ]
+        if not saved_posts_data:
+            return jsonify({"message": "No saved posts found."}), 200 
+        return jsonify(saved_posts_data), 200
+    except Exception as e:
+        print(f"Error getting saved posts: {e}")
+        return jsonify({"error": "Internal Server Error"}), 500
+# On the user Icon when submit new comment in explore
+@app.route('/create_comments', methods=['POST'])
+def create_comments():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json()
+    post_id = data.get('post_id')
+    text = data.get('text')
+
+    if not post_id or not text:
+        return jsonify({"error": "Missing post_id or comment text"}), 400
+    
+    try:
+        new_comment = Comment(user_id=user_id, post_id=post_id, text=text)
+        db.session.add(new_comment)
+        db.session.commit()
+
+        # Optionally, you might want to return the created comment details
+        return jsonify({
+            'id': new_comment.id,
+            'user_id': new_comment.user_id,
+            'post_id': new_comment.post_id,
+            'text': new_comment.text,
+            'timestamp': new_comment.timestamp.isoformat(),
+            'username': new_comment.user.username # Include username
+        }), 201
+    
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error creating comment:  {e}")
+        return jsonify({"error": str(e)}), 500
+
+    
+
+# In Home page displays all users only comments
+@app.route('/comments/me', methods=["GET"])
+def get_own_comments():
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    comments = Comment.query.filter_by(user_id=user_id).options(joinedload(Comment.user)).all()
+
+    comments_data = [{
+        'id': comment.id,
+        'post_id': comment.post_id,
+        'text': comment.text,
+        'timestamp': comment.timestamp,
+        'username': comment.user.username # Include eusername 
+
+    } for comment in comments]
+
+    return jsonify(comments_data), 200
+
+
+# In explore when press on comments icon it opens and displays all comments associated with post_id
+@app.route('/newComments/<post_id>', methods=["GET"])
+def get_posts_comments(post_id):
+    print(post_id)
+    try:
+        comments = (
+            Comment.query
+            .filter_by(post_id=post_id)
+            .options(joinedload(Comment.user))
+            .order_by(Comment.timestamp)
+            .all()
+        )
+        print(comments)
+        if not comments:
+            return jsonify({"message": "No comments found for this Post"})
+        
+        comments_data = []
+        for comment in comments:
+            comment_data = {
+                'id': comment.id,
+                'user_id': comment.user_id,
+                'text': comment.text,
+                'timestamp': comment.timestamp,
+                'username': comment.user.username # Include username
+            }
+            comments_data.append(comment_data)
+
+        return jsonify(comments_data), 200
+    
+    except Exception as e:
+        print(f"Error getting comments: {e}")
+        return jsonify({"error": "Internal Server Error"}), 500
 
 
 
@@ -62,7 +204,7 @@ def get_openAI(photoUri):
             # Sent to gemini API messages
         ]
     )
-    
+
 # Fetch posts for home feed 
 @app.route('/posts', methods=['GET'])
 def get_posts():
@@ -176,6 +318,7 @@ def get_other_post():
             {
                 'id': post.id,
                 'user_id': post.user_id,
+                'username': post.user.username,
                 'content_type': post.content_type,
                 'content_url': post.content_url,
                 'timestamp': post.timestamp,
