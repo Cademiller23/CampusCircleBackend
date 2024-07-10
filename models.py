@@ -6,7 +6,10 @@ from flask_migrate import Migrate
 # Function to generate a unqiue hexidecimal ID 
 def get_uuid():
     return uuid4().hex 
-
+saved_posts_table = db.Table('saved_posts', 
+    db.Column('user_id', db.String(32), db.ForeignKey('users.id')),
+    db.Column('post_id', db.String(32), db.ForeignKey('posts.id')),
+ )
 # User Model representing the structor of the "Users" table and attributes 
 class User(db.Model):
     __tablename__ = "users" # Specify the table name 
@@ -15,7 +18,7 @@ class User(db.Model):
     password = db.Column(db.Text, nullable=False) # Non-nullable password column
     profile_picture = db.Column(db.String(255)) # Store profile picture URL
     username = db.Column(db.String(50), unique=True, nullable=False) # Unique username 
-    
+    saved_posts = db.relationship('Post', secondary=saved_posts_table, backref="saved")
 # Post Model representing users posts
 class Post(db.Model):
     __tablename__ = "posts" # Specifies table name
@@ -27,12 +30,18 @@ class Post(db.Model):
     category = db.Column(db.String)
     user = db.relationship("User", backref="posts")
     # upVotes = db.Column(db.integer())
-# Comment class 
-    # comment id 
-    # Foreign Key - Post, User 
-    # Comment text 
-    # Timestamp 
+
+class Comment(db.Model):
+    __tablename__ = "comments"
+    id = db.Column(db.String(32), primary_key=True, unique=True, default=get_uuid)
+    post_id = db.Column(db.String(32), db.ForeignKey('posts.id'), nullable=False)
+    user_id = db.Column(db.String(32), db.ForeignKey('users.id'), nullable=False)
+    text = db.Column(db.Text, nullable=False)
+    timestamp = db.Column(db.DateTime(timezone=True), default=func.now())
+    post = db.relationship("Post", backref="comments")
+    user = db.relationship("User", backref="comments")
 
 
     # Creates the relationship between user and post (1:M) relationship 
     
+
