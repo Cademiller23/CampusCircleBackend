@@ -41,33 +41,24 @@ def allowed_file(filename):
 @app.route('/save_post/<post_id>', methods=['POST'])
 def save_post(post_id):
     user_id = session.get('user_id')
-    print(user_id)
+    print(f"User ID from session: {user_id}")
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
     
     try:
-        if not request.is_json:
-            return jsonify({"error": "Invalid request data. Expected JSON."}), 400
-        
-        data = request.get_json()
-        user_id = data.get('user_id')
+        # Fetch the original post
+        original_post = Post.query.get(post_id)
+        if not original_post:
+            return jsonify({"error": "Original Post not found"}), 400
 
-        if user_id != session_user_id:
-            return jsonify({'error': 'Unathorized access to save post'})
-        
-
-        user = User.query.get(user_id)
-        post = Post.query.get(post_id)
-
-        if not post:
-            return jsonify({"error": "Post not found"}), 404
-        
-        # Check if the post is already saved by the user 
-
-        if post in user.saved_posts:
-            return jsonify({"message": "Post already saved"}), 200
-        
-        user.saved_posts.append(post)
+        # Create a new post object with the same content but associated with the current user
+        new_post = Post(
+            user_id=user_id,
+            content_type=original_post.content_type,
+            content_url=original_post.content_url,
+            category=original_post.category
+        )
+        db.session.add(new_post)
         db.session.commit()
 
         return jsonify({"message": "Post saved successfully"}), 201
