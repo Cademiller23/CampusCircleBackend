@@ -1,14 +1,17 @@
 # Server side session with added import stored
+# Server side session with added import stored
 from flask import Flask, request, jsonify, session, abort, send_from_directory, url_for # core flask imports
 from flask_bcrypt import Bcrypt # For Password Hashing
 from flask_session import Session # For server-side Session Management
 from models import User, Post, Comment, Like, Poll, PollOption, PollVote # Import the user and post model
 from flask_migrate import Migrate
 from sqlalchemy.orm import joinedload
+from google.cloud import storage
 from config import ApplicationConfig # Import App config
 from database import db # Import the database instance
 from sqlalchemy import desc
 from werkzeug.utils import secure_filename 
+# from authlib.integrations.flask_client import OAuth
 from flask_cors import CORS 
 from openai import OpenAI, Image
 from pathlib import Path
@@ -32,6 +35,51 @@ CORS(app, origins= '*')
 client = OpenAI(api_key=app.config['SECRET_KEY'])
 
 
+# GOOGLE API INTEGRATION
+def get_gcs_client():
+    return storage.Client()
+
+# oauth = OAuth(app)
+# google = oauth.register(
+#     name='google',
+#     client_id=app.config['GOOGLE_CLIENT_ID'],
+#     client_secret= app.config['GOOGLE_CLIENT_SECRET'],
+#     authorize_url='https://accounts.google.com/o/oauth2/auth',
+#     access_token_url='https://accounts.google.com/o/oauth2/token',
+#     client_kwargs={'scope': 'openid profile email'},
+#     redirect_uri='http://127.0.0.1:5000/auth/callback' # ADJUST WHEN GET DOMAIN
+# )
+# # Auth_CallBACK
+# @app.route('/auth/callback')
+# def auth_callback():
+#     token = google.authorize_access_token()
+#     user_info = google.parse_id_token(token)
+
+#     if not user_info:
+#         return jsonify({"error": "Failed to get user info"}), 400
+#         user = User.query.filter_by(email=user_info['email']).first()
+
+#         if not user: 
+#             # If user doesn't exist create a new One
+#             user = User(
+#                 email=user_info['email'],
+#                 username=user_info['name'], # Or however you want to handle the username
+
+#             )
+#             db.session.add(user)
+#         db.session.commit()
+
+#     session['user_id'] = user.id
+#     return jsonify({"message": "Login successful", "user": {"id": user.id, "email": user.email}}), 200
+
+# # LOGIN GOOGLE 
+# @app.route('/login/google')
+# def login_google():
+#     redirect_uri = url_for('auth_callback', _external=True)
+#     return google.authorize_redirect(redirect_uri)
+# Sign Up GOOGLE
+
+   
 # Create database tables if they don't exist 
 with app.app_context():
     db.create_all()
@@ -41,6 +89,21 @@ ALLOWED_EXTENSIONS = {"png", "jpg","jpeg", "mp4", "mov"}
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# Upload Google Cloud
+def upload_to_gcs(file, bucket_name, filename):
+    "Uploads a file to google cloud storage and returns the public URL"
+
+    try:
+        client = storage.Client()
+        bucket = client.get_bucket(bucket_name)
+        blob = bucket.blob(filename)
+        blob.upload_from_file(file, content_type=file.content_type)
+        # blob.make_public() 
+        return f"https://storage.googleapis.com/{bucket_name}/{filename}"
+    except Exception as e:
+        print(f"Faied to upload to GCS: {e}")
+        return None
 
 # The POLLS 
 # Fetch other User Polls
@@ -106,7 +169,6 @@ def create_poll():
         return jsonify({"error": "Unauthorized"}), 401
     
     data = request.get_json()
-    print("RECIEVED Data:", data)
     title = data.get('title')
     options = data.get('options')
     
@@ -338,8 +400,7 @@ def manipulate_image():
             n=1,
             size="1024x1024",
         )
-        print('Prompt:', prompt)
-        print("Response data:", response)
+       
         # Extract URL
         manipulated_image_url = response.data[0].url
 
@@ -353,7 +414,6 @@ def manipulate_image():
 @app.route('/save_post/<post_id>', methods=['POST'])
 def save_post(post_id):
     user_id = session.get('user_id')
-    print(f"User ID from session: {user_id}")
     if not user_id:
         return jsonify({"error": "Unauthorized"}), 401
     
@@ -363,30 +423,7 @@ def save_post(post_id):
         if not original_post:
             return jsonify({"error": "Original Post not found"}), 400
 
-         # Open the image and add the "Created by: [user_id]" watermark
-        image_data = base64.b64decode(original_post.content_url)
-        image = PILImage.open(io.BytesIO(image_data))
-
-        draw = ImageDraw.Draw(image)
-        font = ImageFont.load_default()
-
-        # Position the text at the bottom right corner
-        text = f"Created by: {user_id}"
-        text_bbox = draw.textbbox((0, 0), text, font=font)
-        text_width = text_bbox[2] - text_bbox[0]
-        text_height = text_bbox[3] - text_bbox[1]
-        x = image.width - text_width - 10
-        y = image.height - text_height - 10
-
-        draw.text((x, y), text, font=font, fill=(255, 255, 255, 128))  # White text with some transparency
-
-        # Save the modified image back to a BytesIO object
-        img_byte_arr = io.BytesIO()
-        image.save(img_byte_arr, format='PNG')
-        img_byte_arr.seek(0)
-
-        # Encode the modified image back to base64
-        encoded_image = base64.b64encode(img_byte_arr.getvalue()).decode("utf-8")
+        
         # Create a new post object with the same content but associated with the current user
         new_post = Post(
             user_id=user_id,
@@ -571,25 +608,20 @@ def create_post():
         file = request.files['newImage']
         if file and allowed_file(file.filename):
             # Get the original filename from the request 
-            original_filename = secure_filename(file.filename)
+            filename = secure_filename(file.filename)
+            unique_filename = f"{str(uuid.uuid4())}_{filename}"
+            bucket_name = app.config['GOOGLE_CLOUD_STORAGE_BUCKET']
 
-            # Generate a unique filename using uuid 
-            unique_filename = str(uuid.uuid4()) + '.' + original_filename.rsplit('.', 1)[1].lower()
+            # Upload the file to Google Cloud Storage
+            file_url = upload_to_gcs(file, bucket_name, unique_filename)
 
-            # Construct the full file path to save the image 
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
-
-            # Save the file using the unqiue filename 
-            file.save(file_path)
-
-            # Convert the image to base64 for storage in the data base
-            with open(file_path, "rb") as media_file:
-                encoded_string = base64.b64encode(media_file.read()).decode("utf-8")
+            if not file_url:
+                return jsonify({"error": "Failed to upload to GCS"}), 500
 
             new_post = Post(
                 user_id=user_id,
                 content_type=request.form.get('content_type', 'image/jpeg' if file.mimetype.startswith('image') else 'video/mp4'),  # Default to 'image/jpeg'
-                content_url=encoded_string,  # Store the base64 encoded image
+                content_url=file_url,  # Store the base64 encoded image
                 category=request.form.get('category') # Get Category from request 
             )
 
@@ -773,22 +805,28 @@ def register_user():
 # LOGIN STATUS   
 @app.route('/login', methods=["POST"]) 
 def login_user():
-    email = request.json["email"]
-    password = request.json["password"]
+    identifier = request.json.get('identifier')
+    password = request.json.get('password')
 
-    user = User.query.filter_by(email=email).first()
+    # CHeck if the identifier is an email or username 
+    if '@' in identifier:
+        user = User.query.filter_by(email=identifier).first()
+    else:
+        user = User.query.filter_by(username=identifier).first()
+
     # No user exists
     if user is None:
         return jsonify({"error": "Unauthorized"}), 401
     
     if not bcrypt.check_password_hash(user.password, password):
-        return jsonify({"error": "unathorized"}), 401
+        return jsonify({"error": "Unauthorized"}), 401
     
     session["user_id"] = user.id
     return jsonify({
         "id": user.id,
-        "email": user.email
-      })
+        "email": user.email,
+        "username": user.username
+    }), 200
 
 # Logout Status 
 @app.route('/logout', methods=['POST'])
