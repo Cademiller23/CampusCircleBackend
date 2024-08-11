@@ -1,5 +1,6 @@
 # Server side session with added import stored
 # Server side session with added import stored
+# Server side session with added import stored
 from flask import Flask, request, jsonify, session, abort, send_from_directory, url_for # core flask imports
 from flask_bcrypt import Bcrypt # For Password Hashing
 from flask_session import Session # For server-side Session Management
@@ -17,6 +18,8 @@ from openai import OpenAI, Image
 from pathlib import Path
 from PIL import Image as PILImage, ImageDraw, ImageFont
 import io
+import random
+import smtplib
 import os
 import uuid
 import base64
@@ -712,10 +715,6 @@ def get_my_profile():
 
     user = User.query.get(user_id)
     polls = Poll.query.filter_by(user_id=user_id).all()
-    profile_picture = None
-    if user.profile_picture:
-        with open(os.path.join(app.config['UPLOAD_FOLDER'], user.profile_picture), "rb") as image_file:
-            profile_picture = base64.b64encode(image_file.read()).decode('utf-8')
 
     poll_data = [{
         'id': poll.id,
@@ -728,7 +727,7 @@ def get_my_profile():
         "id": user.id,
         "email": user.email,
         "username": user.username,
-        "profile_picture": profile_picture,
+        "profile_picture": user.profile_picture,  # Use the URL directly
         "polls": poll_data
     }), 200
 
@@ -749,23 +748,30 @@ def update_profile(user_id):
         # Update profile picture (similar to registration)
         if 'profileImage' in request.files:
             file = request.files['profileImage']
-            print(file.filename)
             if file and allowed_file(file.filename):
                 filename = secure_filename(file.filename)
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(file_path)
-                user.profile_picture = filename
+                unique_filename = f"{str(uuid.uuid4())}_{filename}"
+                bucket_name = app.config['GOOGLE_CLOUD_STORAGE_BUCKET']
     
+        # Upload to GCS
+                file_url = upload_to_gcs(file, bucket_name, unique_filename)
+                if not file_url:
+                    return jsonify({"error": "Failed to upload to GCS"}), 500
+
+                user.profile_picture = file_url  # Store the GCS URL
+
         db.session.commit()
         return jsonify({
             "message": "Profile updated successfully",
-            "profile_picture": user.profile_picture  # Return the filename of the profile picture
+            "profile_picture": user.profile_picture
         }), 200
-    except Exception as e:  # Catch any exceptions that may occur
-        db.session.rollback()  # Rollback the transaction if an error occurs
-        print(f"Error updating profile: {e}")  # Log the error for debugging
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error updating profile: {e}")
         return jsonify({"error": "Internal Server Error"}), 500
 
+verification_codes = {}
 
 # Route for register users
 @app.route('/register', methods=["POST"])
@@ -773,35 +779,75 @@ def register_user():
     
     # Registration logic 
     data = request.get_json()
-    print("DATA:", data)
-    email = data['email']
-    username = data['username']
-    password = data['password']
+    email = data.get('email')
+
+    if not email or not email.endswith('@usc.edu'):
+        return jsonify({"error": "Invalid email address"}), 400
+
     # If user exists alreadu in data 
     user_exists = User.query.filter_by(email=email).first() is not None
      # Gives 409 conflict - user exists
     if user_exists:
         return jsonify({"error": "User already exists"}), 409
     
+    # Generate a 6-digit veriification Code
+    verification_code = random.randint(100000, 999999)
+    verification_codes[email] = verification_code
+    
+    # Send the verification code via email 
+    try: 
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login('Caderyland1@gmail.com', 'Caderyland#23')
+            server.sendmail('Caderyland@gmail.com', email, f'subject: Verification Code\n\nYour Verification code is {verification_code}')
+    except Exception as e:
+        return jsonify({"error": "Failed to send verification email"}), 500
+
+    return jsonify({"message": "Verification code sent to email"}), 200
+
+# Route to verify the email code
+@app.route('/verify_email', methods=['POST']):
+def verify_email():
+    data = request.get_json()
+    email = data.get('email')
+    code = int(data.get('code'))
+
+    if email not in verification_codes or verification_code[email] != code:
+        return jsonify({'error', 'Invalid Verification code'})
+    retur jsonify({"message": "Email verified successfully"})
+# Finishing Registration
+@app.route('/complete_registration', methods=["POST"]):
+def complete_registration():
+    data = request.get_json()
+    email = data.get('email')
+    username = data.get('username')
+    password = data.get('password')
+    
+    # Check if the email has been verified
+    if email not in verification_codes:
+        return jsonify({"error": "Email not verified"})
+    
+    # Check if username is already taken
     username_exists = User.query.filter_by(username=username).first() is not None
     if username_exists:
         return jsonify({"error": "Username already exists"}), 409
+    
     hashed_password = bcrypt.generate_password_hash(password).decode('utf-8')
     new_user = User(email=email, password=hashed_password, username=username)
-    print(new_user)
+
     db.session.add(new_user)
     db.session.commit()
-    try:
-        session['user_id'] = new_user.id
-    except redis.ConnectionError as e:
-        print("Redis Connection Error:", e)
-        return jsonify({"error": "Internal server error"}), 500
+
+    session['user_id'] = new_user.id
+    del verification_codes[email]  # Remove the verification code as it is no longer needed
+
     return jsonify({
         "id": new_user.id,
         "email": new_user.email,
         "username": new_user.username,
-        }), 201
+    }), 201
 
+    
 # LOGIN STATUS   
 @app.route('/login', methods=["POST"]) 
 def login_user():
